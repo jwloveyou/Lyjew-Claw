@@ -1,0 +1,14 @@
+apiVersion: 1
+datasources:
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://localhost:3100
+    isDefault: true
+    editable: false
+    jsonData:
+      derivedFields:
+        - name: traceId
+          matcherRegex: '"traceId"\s*:\s*"([A-Fa-f0-9]+)"'
+          url: /explore?left={"datasource":"P8E80F9AEF21F6940","queries":[{"refId":"A","expr":"{job=\"lyclaw\"} | json | traceId=\"$1\""}]}
+          matcherType: regex

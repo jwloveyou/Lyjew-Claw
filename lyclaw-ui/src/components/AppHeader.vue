@@ -1,0 +1,304 @@
+<!--
+  AppHeader：应用顶部栏组件，提供侧栏切换、模型选择、清空聊天和新建聊天等功能入口。
+
+  位置：固定在AppShell布局的main-area顶部，高度45px。
+
+  功能区分布（从左至右）：
+
+  左侧区域（header-left）：
+  - 侧栏折叠按钮：点击切换侧栏的展开/折叠状态
+    · 折叠 → 显示PanelLeftOpen图标（点击展开侧栏）
+    · 展开 → 显示PanelLeftClose图标（点击折叠侧栏）
+
+  右侧区域（header-right）：
+  - 模型选择器（ModelSelector）：仅在/chat路由下显示，
+    使用compact模式缩小尺寸，与顶栏高度协调
+  - 清空聊天按钮（Clear）：仅在/chat路由下且消息数>0时显示，
+    点击清空当前会话的所有消息
+  - 新建聊天按钮（New Chat）：清除当前会话关联并导航到/chat，
+    开始一个全新的对话
+  - 设置按钮（Settings）：导航到/settings页面
+
+  设计决策：
+  - 顶栏高度从原始56px缩减至45px（约为原始80%），
+    压缩视觉空间以优先展示对话内容
+  - 模型选择和清空聊天从原ChatView的独立工具栏移至此处，
+    统一操作入口减少视觉碎片
+  - 图标尺寸统一缩小（16px），与紧凑的顶栏高度协调
+  - 使用border-bottom分隔线与下方内容区形成视觉边界
+-->
+<template>
+  <header class="header">
+    <div class="header-left">
+      <button class="btn-sidebar-toggle" @click="settingsStore.toggleSidebar()" :title="settingsStore.sidebarCollapsed ? '展开侧栏' : '折叠侧栏'">
+        <PanelLeftOpen v-if="settingsStore.sidebarCollapsed" :size="16" />
+        <PanelLeftClose v-else :size="16" />
+      </button>
+      <AgentSelector
+        v-if="isChatRoute"
+        :model-value="agentStore.currentAgentId"
+        :agents="agentStore.agents"
+        @update:model-value="handleAgentChange"
+      />
+      <SessionSelector
+        v-if="isChatRoute"
+        :model-value="sessionStore.currentSessionId"
+        :sessions="sessionStore.sessions"
+        @update:model-value="handleSessionChange"
+        @delete-session="handleSessionDelete"
+        @rename-session="handleSessionRename"
+      />
+    </div>
+    <div class="header-right">
+      <ModelSelector
+        v-if="isChatRoute"
+        :model-value="chatStore.currentModel"
+        :compact="true"
+        @update:model-value="chatStore.setModel"
+      />
+      <button v-if="isChatRoute && chatStore.messages.length > 0" class="btn-clear" title="Clear chat" @click="chatStore.clearChat()">
+        Clear
+      </button>
+      <button class="btn-new-chat" @click="handleNewChat">
+        <Plus :size="14" />
+        <span>New Chat</span>
+      </button>
+      <button class="btn-settings" @click="handleSettings" aria-label="Settings">
+        <Settings :size="16" />
+      </button>
+    </div>
+  </header>
+</template>
+
+<script setup lang="ts">
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Plus, Settings, PanelLeftClose, PanelLeftOpen } from 'lucide-vue-next'
+import { useChatStore } from '@/stores/chat'
+import { useSessionStore } from '@/stores/session'
+import { useSettingsStore } from '@/stores/settings'
+import { useAgentStore } from '@/stores/agent'
+import { fetchMessages } from '@/api/chat'
+import { processRawMessages } from '@/utils/message-mapper'
+import ModelSelector from './ModelSelector.vue'
+import AgentSelector from './AgentSelector.vue'
+import SessionSelector from './SessionSelector.vue'
+
+const route = useRoute()
+const router = useRouter()
+const chatStore = useChatStore()
+const sessionStore = useSessionStore()
+const settingsStore = useSettingsStore()
+const agentStore = useAgentStore()
+
+agentStore.fetchAgents().catch(() => {})
+const initialAgent = route.query.agent as string | undefined
+if (initialAgent && initialAgent !== agentStore.currentAgentId) {
+  agentStore.selectAgent(initialAgent)
+  sessionStore.setAgentId(initialAgent)
+} else if (!initialAgent) {
+  router.replace({ query: { agent: agentStore.currentAgentId } })
+  sessionStore.fetchSessions().catch(() => {})
+} else {
+  sessionStore.fetchSessions().catch(() => {})
+}
+
+/** 是否在聊天页面：仅/chat路由下显示模型选择器和清空按钮 */
+const isChatRoute = computed(() => route.path === '/chat')
+
+async function handleAgentChange(agentId: string) {
+  // 相同agent：重新拉取session列表，加载最新session（不清理消息不闪屏）
+  if (agentId === agentStore.currentAgentId) {
+    await sessionStore.fetchSessions()
+    const sorted = [...sessionStore.sessions].sort((a, b) =>
+      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    )
+    if (sorted.length > 0) {
+      await handleSessionChange(sorted[0].sessionId)
+    }
+    return
+  }
+  agentStore.selectAgent(agentId)
+  await sessionStore.setAgentId(agentId)
+  chatStore.clearChat()
+  chatStore.setSessionId('')
+  router.push({ path: '/chat', query: { agent: agentId } })
+}
+
+async function handleSessionChange(sessionId: string | null) {
+  if (sessionId === null) {
+    chatStore.clearChat()
+    chatStore.setSessionId('')
+    sessionStore.selectSession('')
+    router.push({ path: '/chat', query: { agent: route.query.agent } })
+    return
+  }
+  sessionStore.selectSession(sessionId)
+  chatStore.setSessionId(sessionId)
+  try {
+    const rawMessages = await fetchMessages(sessionStore.currentAgentId, sessionId)
+    chatStore.setMessages(processRawMessages(rawMessages))
+  } catch { /* session may be empty */ }
+  router.replace({ query: { ...route.query, session: sessionId } })
+}
+
+async function handleSessionDelete(sessionId: string) {
+  const wasCurrent = sessionStore.currentSessionId === sessionId
+  await sessionStore.deleteSession(sessionId)
+  await sessionStore.fetchSessions()
+  if (wasCurrent) {
+    chatStore.clearChat()
+    chatStore.setSessionId('')
+    sessionStore.selectSession('')
+    router.push({ path: '/chat', query: { agent: route.query.agent } })
+  }
+}
+
+async function handleSessionRename(sessionId: string, name: string) {
+  await sessionStore.renameSession(sessionId, name)
+}
+
+/**
+ * 创建新聊天：清空当前对话、解除会话关联并导航到聊天页。
+ *
+ * 执行步骤：
+ * 1. 清空ChatStore中的所有消息和错误状态
+ * 2. 清空ChatStore的会话ID关联
+ * 3. 清空SessionStore的当前会话选择
+ * 4. 导航到/chat路由
+ */
+function handleNewChat() {
+  chatStore.clearChat()
+  chatStore.setSessionId('')
+  sessionStore.selectSession('')
+  router.push({ path: '/chat', query: { agent: route.query.agent } })
+}
+
+/** 导航到设置页面 */
+function handleSettings() {
+  router.push('/settings')
+}
+</script>
+
+<style scoped>
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--header-height);
+  padding: 0 12px;
+  background-color: var(--color-canvas);
+  border-bottom: 1px solid var(--color-hairline);
+  flex-shrink: 0;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- 侧栏切换按钮 ---- */
+.btn-sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--rounded-sm);
+  color: var(--color-muted);
+  background-color: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.btn-sidebar-toggle:hover {
+  background-color: var(--color-surface-card);
+  color: var(--color-body-strong);
+}
+
+/* ---- 清空聊天按钮 ---- */
+.btn-clear {
+  padding: 2px 8px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-sm);
+  background: transparent;
+  color: var(--color-muted);
+  font-family: var(--font-sans);
+  font-size: var(--caption-size);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.btn-clear:hover {
+  background: var(--color-surface-soft);
+  border-color: var(--color-muted-soft);
+  color: var(--color-body);
+}
+
+/* ---- 新建聊天按钮 ---- */
+.btn-new-chat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background-color: var(--color-primary);
+  color: var(--color-on-primary);
+  font-size: var(--caption-size);
+  font-weight: var(--button-weight);
+  line-height: var(--button-line-height);
+  border: none;
+  border-radius: var(--rounded-md);
+  cursor: pointer;
+  transition: background-color var(--transition-base), box-shadow var(--transition-base);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-new-chat:hover {
+  background-color: var(--color-primary-active);
+  box-shadow: var(--shadow-md);
+}
+
+/* ---- 设置按钮 ---- */
+.btn-settings {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--rounded-pill);
+  color: var(--color-muted);
+  background-color: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.btn-settings:hover {
+  background-color: var(--color-surface-card);
+  color: var(--color-body-strong);
+}
+
+/* ---- Mobile ---- */
+@media (max-width: 768px) {
+  .header {
+    padding: 0 8px;
+  }
+
+  .btn-new-chat span {
+    display: none;
+  }
+
+  .btn-new-chat {
+    padding: 4px 8px;
+  }
+}
+</style>

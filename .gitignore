@@ -1,0 +1,13 @@
+target/
+*.class
+*.jar
+*.log
+.idea/
+*.iml
+.DS_Store
+.mvn/
+
+LyClaw/
+docx/
+data/
+logs/
